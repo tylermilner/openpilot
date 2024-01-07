@@ -398,8 +398,55 @@ def get_platform_codes(fw_versions: List[bytes]) -> Set[Tuple[bytes, Optional[by
 
 
 def match_fw_to_car_fuzzy(live_fw_versions) -> Set[str]:
-  # Hardcode to Tucson hybrid for now, since the fw versions also match the non-hybrid version
-  return {CAR.TUCSON_HYBRID_4TH_GEN}
+  # Non-electric CAN FD platforms often do not have platform code specifiers needed
+  # to distinguish between hybrid and ICE. All EVs so far are either exclusively
+  # electric or specify electric in the platform code.
+  # TODO: whitelist platforms that we've seen hybrid and ICE versions of that have these specifiers
+  fuzzy_platform_blacklist = {str(c) for c in set(CANFD_CAR - EV_CAR)}
+  candidates: Set[str] = set()
+
+  for candidate, fws in FW_VERSIONS.items():
+    # Keep track of ECUs which pass all checks (platform codes, within date range)
+    valid_found_ecus = set()
+    valid_expected_ecus = {ecu[1:] for ecu in fws if ecu[0] in PLATFORM_CODE_ECUS}
+    for ecu, expected_versions in fws.items():
+      addr = ecu[1:]
+      # Only check ECUs expected to have platform codes
+      if ecu[0] not in PLATFORM_CODE_ECUS:
+        continue
+
+      # Expected platform codes & dates
+      codes = get_platform_codes(expected_versions)
+      expected_platform_codes = {code for code, _ in codes}
+      expected_dates = {date for _, date in codes if date is not None}
+
+      # Found platform codes & dates
+      codes = get_platform_codes(live_fw_versions.get(addr, set()))
+      found_platform_codes = {code for code, _ in codes}
+      found_dates = {date for _, date in codes if date is not None}
+
+      # Check platform code + part number matches for any found versions
+      if not any(found_platform_code in expected_platform_codes for found_platform_code in found_platform_codes):
+        break
+
+      if ecu[0] in DATE_FW_ECUS:
+        # If ECU can have a FW date, require it to exist
+        # (this excludes candidates in the database without dates)
+        if not len(expected_dates) or not len(found_dates):
+          break
+
+        # Check any date within range in the database, format is %y%m%d
+        if not any(min(expected_dates) <= found_date <= max(expected_dates) for found_date in found_dates):
+          break
+
+      valid_found_ecus.add(addr)
+
+    # If all live ECUs pass all checks for candidate, add it as a match
+    if valid_expected_ecus.issubset(valid_found_ecus):
+      candidates.add(candidate)
+
+  return candidates - fuzzy_platform_blacklist
+
 
 HYUNDAI_VERSION_REQUEST_LONG = bytes([uds.SERVICE_TYPE.READ_DATA_BY_IDENTIFIER]) + \
   p16(0xf100)  # Long description
